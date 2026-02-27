@@ -1,0 +1,42 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8888
+  },
+  "providers": [
+    {
+      "name": "ProviderA",
+      "protocol": "anthropic",
+      "base_url": "https://api.provider-a.com/v1/messages",
+      "api_key": "sk-your-key-here",
+      "models": {
+        "claude-3-haiku-20240307": "provider-model-name-a",
+        "claude-3-sonnet-20240229": "provider-model-name-b"
+      },
+      "default_model": "provider-default-model",
+      "timeout": 300,
+      "priority": 1,
+      "enabled": true
+    },
+    {
+      "name": "ProviderB",
+      "protocol": "openai",
+      "base_url": "https://api.provider-b.com/v1",
+      "api_key": "sk-your-key-here",
+      "models": {
+        "claude-3-haiku-20240307": "gpt-3.5-turbo"
+      },
+      "default_model": "gpt-3.5-turbo",
+      "timeout": 60,
+      "priority": 2,
+      "enabled": true
+    }
+  ],
+  "failover": {
+    "max_retries": 3,
+    "retry_on_status": [401, 403, 408, 429, 500, 502, 503, 504],
+    "cooldown_seconds": 60,
+    "cooldown_429_seconds": 300,
+    "cooldown_403_seconds": 3600
+  }
+}
