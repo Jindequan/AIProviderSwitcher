@@ -32,9 +32,9 @@ def load_config():
             # Filter enabled providers and sort by priority
             raw_providers = [p for p in GLOBAL_CONFIG.get("providers", []) if p.get("enabled", True)]
             PROVIDERS = {p["name"]: p for p in raw_providers}
-            print(f"Loaded {len(PROVIDERS)} providers: {list(PROVIDERS.keys())}")
+            print(f"[APS] Loaded {len(PROVIDERS)} providers: {list(PROVIDERS.keys())}")
     except Exception as e:
-        print(f"Error loading config: {e}")
+        print(f"[APS] Error loading config: {e}")
 
 class ProviderManager:
     @staticmethod
@@ -79,7 +79,7 @@ class ProviderManager:
             duration = cooldown_403
         
         COOLDOWNS[provider_name] = time.time() + duration
-        print(f"Provider {provider_name} failed (status {status_code}). Cooldown for {duration}s.")
+        print(f"[APS] Cooldown: Provider {provider_name} failed (status {status_code}). Cooldown for {duration}s.")
 
 import re
 
@@ -170,7 +170,10 @@ async def proxy_request(request: Request, body: Dict[str, Any], protocol: str, t
         
         headers = make_headers(provider, dict(request.headers), protocol)
         
-        print(f"[APS] {protocol.upper()} -> {p_name} | {original_model} -> {mapped_model}")
+        # Check verbose logging
+        is_verbose = GLOBAL_CONFIG.get("server", {}).get("verbose", False)
+        if is_verbose:
+            print(f"[APS] {protocol.upper()} -> {p_name} | {original_model} -> {mapped_model}")
 
         try:
             # Respect client's stream preference
@@ -208,7 +211,7 @@ async def proxy_request(request: Request, body: Dict[str, Any], protocol: str, t
                     error_str = str(error_content).lower()
                     # Keywords indicating model unavailability or invalid request format specific to provider
                     if "model" in error_str or "not found" in error_str or "support" in error_str:
-                        print(f"Provider {p_name} 400 Error (Model/Support issue): {error_str[:100]}... Trying next.")
+                        print(f"[APS] Warning: Provider {p_name} 400 Error (Model/Support issue): {error_str[:100]}... Trying next.")
                         # Mark failure with short cooldown as it might be model specific
                         ProviderManager.mark_failure(p_name, 400, retry_after=5) 
                         last_error_response = resp
@@ -237,17 +240,17 @@ async def proxy_request(request: Request, body: Dict[str, Any], protocol: str, t
                         extracted_time = extract_wait_time(error_text)
                         if extracted_time:
                             retry_after = extracted_time
-                            print(f"Extracted retry time from body: {retry_after}s")
+                            print(f"[APS] Extracted retry time from body: {retry_after}s")
                     except:
                         pass
 
                 ProviderManager.mark_failure(p_name, resp.status_code, retry_after)
                 last_error_response = resp
-                print(f"Provider {p_name} failed with {resp.status_code}, trying next...")
+                print(f"[APS] Failover: Provider {p_name} failed with {resp.status_code}, trying next...")
                 continue
             
             else:
-                print(f"Provider {p_name} returned non-retriable error {resp.status_code}")
+                print(f"[APS] Error: Provider {p_name} returned non-retriable error {resp.status_code}")
                 return StreamingResponse(
                     resp.iter_content(chunk_size=None),
                     status_code=resp.status_code,
@@ -255,7 +258,7 @@ async def proxy_request(request: Request, body: Dict[str, Any], protocol: str, t
                 )
 
         except Exception as e:
-            print(f"Provider {p_name} exception: {e}")
+            print(f"[APS] Exception: Provider {p_name} error: {e}")
             ProviderManager.mark_failure(p_name, 999)
             continue
 

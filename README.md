@@ -28,7 +28,8 @@ Edit `config.json` and fill in your API Key and Base URL:
 {
   "server": {
     "host": "127.0.0.1",
-    "port": 8888
+    "port": 8888,
+    "verbose": false
   },
   "providers": [
     {
