@@ -22,7 +22,8 @@ async def health_check():
 CONFIG_FILE = "config.json"
 GLOBAL_CONFIG = {}
 PROVIDERS = {}
-COOLDOWNS: Dict[str, float] = {}  # provider_name -> timestamp
+# provider_name -> { "retry_at": float, "reason": str }
+COOLDOWNS: Dict[str, Dict[str, Any]] = {}
 
 def load_config():
     global GLOBAL_CONFIG, PROVIDERS
@@ -50,10 +51,16 @@ class ProviderManager:
                 continue
 
             # Check cooldown
-            cooldown_until = COOLDOWNS.get(name, 0)
-            if current_time < cooldown_until:
-                # print(f"Provider {name} is cooling down until {datetime.datetime.fromtimestamp(cooldown_until)}")
-                continue
+            cooldown_info = COOLDOWNS.get(name)
+            if cooldown_info:
+                retry_at = cooldown_info.get("retry_at", 0)
+                if current_time < retry_at:
+                    # print(f"Provider {name} is cooling down until {datetime.datetime.fromtimestamp(retry_at)}")
+                    continue
+                else:
+                    # Cooldown expired, remove from COOLDOWNS
+                    del COOLDOWNS[name]
+            
             candidates.append(p)
         
         # Sort by priority
@@ -78,8 +85,12 @@ class ProviderManager:
         elif status_code == 403 or status_code == 401:
             duration = cooldown_403
         
-        COOLDOWNS[provider_name] = time.time() + duration
-        print(f"[APS] Cooldown: Provider {provider_name} failed (status {status_code}). Cooldown for {duration}s.")
+        retry_at = time.time() + duration
+        COOLDOWNS[provider_name] = {
+            "retry_at": retry_at,
+            "reason": f"Status {status_code}"
+        }
+        print(f"[APS] Cooldown: Provider {provider_name} failed (status {status_code}). Cooldown for {duration}s until {datetime.datetime.fromtimestamp(retry_at)}")
 
 import re
 
@@ -104,17 +115,41 @@ def map_model(provider: Dict[str, Any], original_model: str) -> str:
 
 def extract_wait_time(text: str) -> Optional[int]:
     """Extract wait time in seconds from error message text."""
-    # Match patterns like "try again in 20s", "retry after 30 seconds", "limit resets in 45s"
-    # Prioritize seconds
-    match = re.search(r'(\d+)\s*(s|sec|second)', text.lower())
+    text_lower = text.lower()
+    
+    # 1. OpenAI / Azure style: "Please retry after 86400 seconds."
+    match = re.search(r'retry after\s*(\d+)\s*seconds?', text_lower)
+    if match:
+        return int(match.group(1))
+
+    # 2. Generic "try again in X seconds"
+    match = re.search(r'try again in\s*(\d+)\s*seconds?', text_lower)
+    if match:
+        return int(match.group(1))
+        
+    # 3. Z.AI / GLM style or others: "limit resets in X seconds"
+    match = re.search(r'limit resets? in\s*(\d+)\s*seconds?', text_lower)
+    if match:
+        return int(match.group(1))
+
+    # 4. Short format: "20s", "30s" (often in headers or short messages)
+    # Be careful not to match random numbers, look for boundaries or specific context if possible
+    # But user asked for broad matching. Let's try to be specific enough.
+    # Regex for "X s" or "X sec"
+    match = re.search(r'(\d+)\s*(s|sec|seconds?)\b', text_lower)
     if match:
         return int(match.group(1))
     
-    # Sometimes it might be minutes
-    match = re.search(r'(\d+)\s*(m|min|minute)', text.lower())
+    # 5. Minutes
+    match = re.search(r'(\d+)\s*(m|min|minutes?)\b', text_lower)
     if match:
         return int(match.group(1)) * 60
         
+    # 6. Hours (rare but possible for 403/quota)
+    match = re.search(r'(\d+)\s*(h|hr|hours?)\b', text_lower)
+    if match:
+        return int(match.group(1)) * 3600
+
     return None
 
 def make_headers(provider: Dict[str, Any], incoming_headers: Dict[str, str], protocol: str) -> Dict[str, str]:
@@ -179,15 +214,34 @@ async def proxy_request(request: Request, body: Dict[str, Any], protocol: str, t
             # Respect client's stream preference
             is_stream = new_body.get("stream", True)
             
-            resp = requests.post(
-                target_url,
-                headers=headers,
-                json=new_body,
-                stream=is_stream,
-                timeout=provider.get("timeout", 60),
-                proxies={"http": None, "https": None} 
-            )
+            # Retry logic for connection issues
+            max_retries = 3
+            retry_delay = 1
+            resp = None
+            last_exception = None
             
+            for attempt in range(max_retries):
+                try:
+                    resp = requests.post(
+                        target_url,
+                        headers=headers,
+                        json=new_body,
+                        stream=is_stream,
+                        timeout=provider.get("timeout", 60),
+                        proxies={"http": None, "https": None} 
+                    )
+                    last_exception = None
+                    break # Success
+                except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                    last_exception = e
+                    print(f"[APS] Warning: Connection error with {p_name} (Attempt {attempt+1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        retry_delay *= 2 # Exponential backoff for connection retries
+            
+            if last_exception:
+                raise last_exception
+
             if resp.status_code == 200:
                 ProviderManager.mark_success(p_name)
                 
