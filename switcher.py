@@ -9,6 +9,7 @@ import json
 import time
 import asyncio
 import re
+import warnings
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Optional, AsyncGenerator, Any
@@ -625,6 +626,8 @@ def _compute_retry_at_epoch(
         return now + 300
     elif status_code == 408:
         return now + 60
+    elif status_code == 400:
+        return now + 60
 
     return None
 
@@ -875,6 +878,13 @@ class SmartRouter:
             if retry_at:
                 endpoint.set_cooldown(retry_at)
             raise
+        except Exception as e:
+            error_str = str(e)
+            # SSE error events (HTTP 200 with event:error body) or other unhandled errors
+            retry_at = _compute_retry_at_epoch(400, {}, error_str)
+            if retry_at and endpoint.retry_at < retry_at:
+                endpoint.set_cooldown(retry_at)
+            raise
 
     async def _try_provider_non_stream(
         self,
@@ -922,7 +932,11 @@ class SmartRouter:
             body = clean_body(body)
             client = anthropic.AsyncAnthropic(api_key=endpoint.api_key, base_url=endpoint.base_url)
             response = await client.messages.create(**body)
-            return response.model_dump() if hasattr(response, "model_dump") else response
+            if not hasattr(response, "model_dump"):
+                return response
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                return response.model_dump()
 
         except anthropic.RateLimitError as e:
             headers: Dict = {}
@@ -972,7 +986,13 @@ class SmartRouter:
             if retry_at:
                 endpoint.set_cooldown(retry_at)
             raise
-    
+        except Exception as e:
+            error_str = str(e)
+            retry_at = _compute_retry_at_epoch(400, {}, error_str)
+            if retry_at and endpoint.retry_at < retry_at:
+                endpoint.set_cooldown(retry_at)
+            raise
+
     async def request_stream(
         self,
         protocol: str,
